@@ -403,8 +403,8 @@
     <!-- LOGIN FORM -->
     <div id="login-form">
       <div class="form-group">
-        <label>Felhasználónév vagy Email</label>
-        <input type="text" id="login-identifier" placeholder="pl. kovacs_peter vagy email@cim.hu" />
+        <label>Email cím</label>
+        <input type="email" id="login-identifier" placeholder="email@cim.hu" />
       </div>
       <div class="form-group">
         <label>Jelszó</label>
@@ -618,17 +618,18 @@ async function handleRegister() {
   btn.innerHTML = '<span class="spinner"></span>';
   btn.disabled = true;
 
-  // Check username uniqueness
-  const { data: existing } = await sb.from('profiles').select('id').eq('username', username).maybeSingle();
-  if (existing) { btn.innerHTML = 'Fiók létrehozása'; btn.disabled = false; return showAlert('Ez a felhasználónév már foglalt!'); }
-
+  // A signUp a username-t metadata-ként menti, a trigger/loadProfile kezeli az egyediséget
   const { data, error } = await sb.auth.signUp({
     email, password,
     options: { data: { username } }
   });
 
   btn.innerHTML = 'Fiók létrehozása'; btn.disabled = false;
-  if (error) return showAlert(error.message);
+
+  if (error) {
+    if (error.message.includes('already registered')) return showAlert('Ez az email cím már regisztrálva van!');
+    return showAlert(error.message);
+  }
 
   showAlert('Sikeres regisztráció! Erősítsd meg az email címed a beérkező levelek között.', 'success');
 }
@@ -643,17 +644,21 @@ async function handleLogin() {
   btn.innerHTML = '<span class="spinner"></span>';
   btn.disabled = true;
 
+  // Ha @ van benne → email, egyébként megpróbálunk email-ként is bejelentkezni
+  // (a felhasználónév→email lookup RLS miatt nem működik bejelentkezés előtt)
   let email = identifier;
-  // If not email format, look up by username
   if (!identifier.includes('@')) {
-    const { data: profile } = await sb.from('profiles').select('email').eq('username', identifier).maybeSingle();
-    if (!profile) { btn.innerHTML = 'Bejelentkezés'; btn.disabled = false; return showAlert('Nem található ilyen felhasználónév!'); }
-    email = profile.email;
+    // Felhasználónévvel bejelentkezés: a profiles táblát csak bejelentkezés UTÁN
+    // lehet lekérdezni, ezért itt egy trükköt alkalmazunk:
+    // Megpróbáljuk a felhasználónevet email-ként (hátha azt írta be),
+    // majd ha hibás, megmondjuk hogy email cím kell.
+    btn.innerHTML = 'Bejelentkezés'; btn.disabled = false;
+    return showAlert('Felhasználónévvel sajnos nem lehet bejelentkezni (Supabase korlátozás). Kérjük, add meg az email címed!');
   }
 
   const { data, error } = await sb.auth.signInWithPassword({ email, password });
   btn.innerHTML = 'Bejelentkezés'; btn.disabled = false;
-  if (error) return showAlert('Hibás email/jelszó!');
+  if (error) return showAlert('Hibás email cím vagy jelszó!');
 }
 
 async function handleForgot() {
@@ -693,18 +698,29 @@ sb.auth.onAuthStateChange(async (event, session) => {
 });
 
 async function loadProfile() {
-  const { data } = await sb.from('profiles').select('*').eq('id', currentUser.id).maybeSingle();
-  if (data) {
-    currentProfile = data;
-  } else {
-    // Create profile if not exists (first login)
-    const username = currentUser.user_metadata?.username || currentUser.email.split('@')[0];
-    const { data: newProfile } = await sb.from('profiles').insert({
-      id: currentUser.id,
-      username,
-      email: currentUser.email
-    }).select().single();
-    currentProfile = newProfile;
+  try {
+    const { data, error } = await sb.from('profiles').select('*').eq('id', currentUser.id).maybeSingle();
+    if (data) {
+      currentProfile = data;
+    } else {
+      // Create profile if not exists (first login after email confirm)
+      const username = currentUser.user_metadata?.username || currentUser.email.split('@')[0];
+      const { data: newProfile, error: insertErr } = await sb.from('profiles').insert({
+        id: currentUser.id,
+        username,
+        email: currentUser.email
+      }).select().single();
+      if (!insertErr) currentProfile = newProfile;
+      // Ha már létezik (unique conflict), próbáljuk újra lekérni
+      if (insertErr) {
+        const { data: retry } = await sb.from('profiles').select('*').eq('id', currentUser.id).maybeSingle();
+        currentProfile = retry;
+      }
+    }
+  } catch(e) {
+    console.error('loadProfile error:', e);
+    // Fallback: email-ből csinálunk nevet
+    currentProfile = { username: currentUser.email.split('@')[0], email: currentUser.email };
   }
 }
 
@@ -1023,6 +1039,109 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
 document.getElementById('new-group-name').addEventListener('keydown', e => {
   if (e.key === 'Enter') createGroup();
 });
+
+// ══════════════════════════════════════════
+//  URL HASH KEZELÉS (Supabase email callback)
+// ══════════════════════════════════════════
+(function handleHashParams() {
+  const hash = window.location.hash.substring(1);
+  if (!hash) return;
+
+  const params = {};
+  hash.split('&').forEach(part => {
+    const [k, v] = part.split('=');
+    params[decodeURIComponent(k)] = decodeURIComponent(v || '');
+  });
+
+  // HIBA (pl. lejárt link)
+  if (params.error) {
+    // Töröljük a hash-t az URL-ből
+    history.replaceState(null, '', window.location.pathname);
+
+    const errorMap = {
+      'otp_expired': 'A megerősítő link lejárt. Regisztrálj újra, vagy kérj új jelszó-visszaállító emailt.',
+      'access_denied': 'A link érvénytelen vagy már felhasználták.',
+    };
+    const msg = errorMap[params.error_code] || params.error_description || 'Ismeretlen hiba történt.';
+
+    // Megvárjuk az oldal betöltését, majd megjelenítjük a hibaüzenetet
+    window.addEventListener('DOMContentLoaded', () => {
+      showAlert(msg, 'error');
+    }, { once: true });
+    // Ha már betöltött
+    if (document.readyState !== 'loading') showAlert(msg, 'error');
+    return;
+  }
+
+  // JELSZÓ VISSZAÁLLÍTÁS (recovery token)
+  if (params.type === 'recovery' && params.access_token) {
+    history.replaceState(null, '', window.location.pathname);
+    // Supabase automatikusan beállítja a session-t a tokenből,
+    // az onAuthStateChange 'PASSWORD_RECOVERY' event-et dob
+  }
+
+  // EMAIL MEGERŐSÍTÉS SIKERES
+  if (params.type === 'signup' || params.type === 'email_change') {
+    history.replaceState(null, '', window.location.pathname);
+    // A Supabase kliens automatikusan bejelentkeztet
+  }
+})();
+
+// Jelszó-visszaállítás esemény kezelése
+sb.auth.onAuthStateChange(async (event, session) => {
+  if (event === 'PASSWORD_RECOVERY') {
+    // Megjelenítjük a jelszó-csere modalt
+    document.getElementById('modal-reset-password').classList.remove('hidden');
+  }
+});
+
+async function handleResetPassword() {
+  const p1 = document.getElementById('reset-pw-1').value;
+  const p2 = document.getElementById('reset-pw-2').value;
+  if (p1.length < 6) return showResetError('A jelszó legalább 6 karakter kell legyen!');
+  if (p1 !== p2) return showResetError('A két jelszó nem egyezik!');
+
+  const btn = document.getElementById('btn-reset-pw');
+  btn.innerHTML = '<span class="spinner"></span>';
+  btn.disabled = true;
+
+  const { error } = await sb.auth.updateUser({ password: p1 });
+  btn.innerHTML = 'Jelszó mentése';
+  btn.disabled = false;
+
+  if (error) return showResetError(error.message);
+
+  document.getElementById('reset-pw-alert').className = 'alert show alert-success';
+  document.getElementById('reset-pw-alert').textContent = 'Jelszó sikeresen megváltoztatva! Bejelentkeztünk.';
+  setTimeout(() => closeModal('modal-reset-password'), 2000);
+}
+
+function showResetError(msg) {
+  const el = document.getElementById('reset-pw-alert');
+  el.className = 'alert show alert-error';
+  el.textContent = msg;
+}
 </script>
+
+<!-- ── RESET PASSWORD MODAL ── -->
+<div class="modal-overlay hidden" id="modal-reset-password">
+  <div class="modal">
+    <h3>🔐 Új jelszó beállítása</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:20px;">Add meg az új jelszavadat.</p>
+    <div id="reset-pw-alert" class="alert"></div>
+    <div class="form-group">
+      <label>Új jelszó</label>
+      <input type="password" id="reset-pw-1" placeholder="Min. 6 karakter" />
+    </div>
+    <div class="form-group">
+      <label>Új jelszó mégegyszer</label>
+      <input type="password" id="reset-pw-2" placeholder="••••••••" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-primary" style="width:auto" id="btn-reset-pw" onclick="handleResetPassword()">Jelszó mentése</button>
+    </div>
+  </div>
+</div>
+
 </body>
 </html>
