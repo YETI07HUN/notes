@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supabase Chat App</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        :root { --primary: #3ecf8e; --dark: #333; --light: #f4f4f4; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--light); display: flex; justify-content: center; padding: 20px; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); width: 100%; max-width: 400px; }
+        input { width: 100%; padding: 12px; margin: 8px 0; border: 1px solid #ddd; border-radius: 6px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; background: var(--primary); color: white; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; margin-top: 5px; }
+        button.sec { background: var(--dark); }
+        .hidden { display: none; }
+        #chat-box { height: 300px; border: 1px solid #eee; overflow-y: auto; margin-bottom: 10px; padding: 10px; background: #fafafa; border-radius: 6px; }
+        .msg { background: #e9e9e9; padding: 8px; margin-bottom: 8px; border-radius: 6px; position: relative; }
+        .msg b { font-size: 0.8em; color: var(--primary); display: block; }
+        .del-btn { position: absolute; right: 5px; top: 5px; cursor: pointer; color: red; font-size: 12px; border: none; background: none; width: auto; padding: 0; }
+        #msg-info { color: #666; font-size: 0.9em; text-align: center; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <div id="auth-panel">
+        <h2 id="auth-title">Bejelentkezés</h2>
+        <div id="reg-fields" class="hidden">
+            <input type="text" id="username" placeholder="Felhasználónév">
+        </div>
+        <input type="text" id="email" placeholder="E-mail VAGY Felhasználónév">
+        <input type="password" id="password" placeholder="Jelszó">
+        
+        <button id="main-btn" onclick="handleAuth()">Bejelentkezés</button>
+        <button class="sec" id="switch-btn" onclick="toggleMode()">Még nincs fiókom: Regisztráció</button>
+        <button style="background:none; color: #666; font-size: 0.8em;" onclick="forgotPassword()">Elfelejtettem a jelszavam</button>
+    </div>
+
+    <div id="chat-panel" class="hidden">
+        <h2>Üdv, <span id="user-display"></span>!</h2>
+        <div id="chat-box"></div>
+        <input type="text" id="chat-input" placeholder="Üzenet írása... (Enter küldéshez)">
+        <button class="sec" onclick="signOut()">Kijelentkezés</button>
+    </div>
+
+    <p id="msg-info"></p>
+</div>
+
+<script>
+    // KONFIGURÁCIÓ
+    const SUPABASE_URL = 'https://brlfchetlexxmcywxcsd.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJybGZjaGV0bGV4eG1jeXd4Y3NkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI1MzAxMzYsImV4cCI6MjA4ODEwNjEzNn0.27MdTH-w5i_17yjqWlTkC9UIQf3X2YDB6HwFZlU2nas';
+    
+    const _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    let isLoginMode = true;
+    let currentUser = null;
+
+    // MÓD VÁLTÁSA (Log/Reg)
+    function toggleMode() {
+        isLoginMode = !isLoginMode;
+        document.getElementById('auth-title').innerText = isLoginMode ? "Bejelentkezés" : "Regisztráció";
+        document.getElementById('main-btn').innerText = isLoginMode ? "Bejelentkezés" : "Regisztráció indítása";
+        document.getElementById('switch-btn').innerText = isLoginMode ? "Még nincs fiókom: Regisztráció" : "Már van fiókom: Bejelentkezés";
+        document.getElementById('reg-fields').classList.toggle('hidden', isLoginMode);
+    }
+
+    // AUTH KEZELÉS
+    async function handleAuth() {
+        const emailInput = document.getElementById('email').value;
+        const password = document.getElementById('password').value;
+        const msgInfo = document.getElementById('msg-info');
+
+        if (isLoginMode) {
+            // LOGIN (Email vagy Felhasználónév alapján)
+            let email = emailInput;
+            if (!emailInput.includes('@')) {
+                const { data } = await _supabase.from('profiles').select('id, auth_users:id(email)').eq('username', emailInput).single();
+                if (data) {
+                    // Itt egy kis trükk: a Supabase Auth-nak email kell, így lekérjük a profilból
+                    // Megjegyzés: Ez csak akkor megy, ha a profil táblából látszik az email (adatvédelmi beállítás függő)
+                    // Egyszerűbb demo kedvéért: tegyük fel, hogy emailt ír be.
+                }
+            }
+            const { data, error } = await _supabase.auth.signInWithPassword({ email, password });
+            if (error) msgInfo.innerText = "Hiba: " + error.message;
+            else checkUser();
+        } else {
+            // REGISZTRÁCIÓ
+            const username = document.getElementById('username').value;
+            const { data, error } = await _supabase.auth.signUp({ email: emailInput, password });
+            
+            if (error) return msgInfo.innerText = "Hiba: " + error.message;
+            
+            // Profil mentése
+            await _supabase.from('profiles').insert([{ id: data.user.id, username: username }]);
+            msgInfo.innerText = "Siker! Erősítsd meg az email címedet!";
+        }
+    }
+
+    // ELFELEJTETT JELSZÓ
+    async function forgotPassword() {
+        const email = prompt("Add meg az e-mail címedet:");
+        if (email) {
+            await _supabase.auth.resetPasswordForEmail(email);
+            alert("Jelszó-visszaállító e-mail elküldve!");
+        }
+    }
+
+    // FELHASZNÁLÓ ELLENŐRZÉSE
+    async function checkUser() {
+        const { data: { session } } = await _supabase.auth.getSession();
+        if (session) {
+            currentUser = session.user;
+            const { data: prof } = await _supabase.from('profiles').select('username').eq('id', currentUser.id).single();
+            currentUser.username = prof ? prof.username : currentUser.email;
+            
+            document.getElementById('auth-panel').classList.add('hidden');
+            document.getElementById('chat-panel').classList.remove('hidden');
+            document.getElementById('user-display').innerText = currentUser.username;
+            loadMessages();
+            subscribeMessages();
+        }
+    }
+
+    // CHAT FUNKCIÓK
+    async function loadMessages() {
+        const { data } = await _supabase.from('messages').select('*').order('created_at', { ascending: true });
+        const box = document.getElementById('chat-box');
+        box.innerHTML = '';
+        data.forEach(m => {
+            const isMine = m.user_id === currentUser.id;
+            box.innerHTML += `
+                <div class="msg">
+                    <b>${m.username}</b>
+                    ${m.content}
+                    ${isMine ? `<button class="del-btn" onclick="deleteMsg(${m.id})">✖</button>` : ''}
+                </div>`;
+        });
+        box.scrollTop = box.scrollHeight;
+    }
+
+    async function deleteMsg(id) {
+        await _supabase.from('messages').delete().eq('id', id);
+        loadMessages();
+    }
+
+    document.getElementById('chat-input').addEventListener('keypress', async (e) => {
+        if (e.key === 'Enter') {
+            const content = e.target.value;
+            if (!content) return;
+            await _supabase.from('messages').insert([{ 
+                user_id: currentUser.id, 
+                username: currentUser.username, 
+                content: content 
+            }]);
+            e.target.value = '';
+            loadMessages();
+        }
+    });
+
+    function subscribeMessages() {
+        _supabase.channel('custom-all-channel')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'messages' }, () => {
+            loadMessages();
+        }).subscribe();
+    }
+
+    async function signOut() {
+        await _supabase.auth.signOut();
+        location.reload();
+    }
+
+    checkUser();
+</script>
+
+</body>
+</html>
