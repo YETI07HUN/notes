@@ -285,14 +285,24 @@ sb.auth.onAuthStateChange(async (event, session) => {
     return;
   }
 
-  if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+  if (event === 'SIGNED_IN') {
+    if (session?.user) {
+      currentUser = session.user;
+      currentProfile = null; // újratöltés kényszerítése
+      await loadProfile();
+      showApp();
+      if (window.location.hash.includes('access_token')) {
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+    }
+    return;
+  }
+
+  if (event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
     if (session?.user) {
       currentUser = session.user;
       if (!currentProfile) await loadProfile();
       if (document.getElementById('app').classList.contains('hidden')) showApp();
-      if (window.location.hash.includes('access_token')) {
-        history.replaceState(null, '', window.location.pathname + window.location.search);
-      }
     }
     return;
   }
