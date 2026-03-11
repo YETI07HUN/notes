@@ -257,9 +257,26 @@ const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 let currentUser=null, currentProfile=null, currentGroup=null;
 let groups=[], realtimeSub=null, pendingFiles=[];
 
-// EGYETLEN onAuthStateChange – a korábbi kettős listener okozta a kijelentkezést
+// Oldal betöltésekor azonnal lekérjük a tárolt session-t → nincs login-oldal villanás frissítéskor
+(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session?.user) {
+    currentUser = session.user;
+    await loadProfile();
+    showApp();
+    if (window.location.hash.includes('access_token')) {
+      history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
+  } else {
+    showAuth();
+  }
+})();
+
+// onAuthStateChange – csak a getSession UTÁNI változásokra reagál (login/logout/recovery)
 sb.auth.onAuthStateChange(async (event, session) => {
   console.log('[Auth]', event, session?.user?.email ?? '-');
+
+  if (event === 'INITIAL_SESSION') return; // getSession már kezelte
 
   if (event === 'PASSWORD_RECOVERY') {
     document.getElementById('auth-screen').classList.remove('hidden');
@@ -268,19 +285,22 @@ sb.auth.onAuthStateChange(async (event, session) => {
     return;
   }
 
-  if (session?.user) {
-    currentUser = session.user;
-    await loadProfile();
-    showApp();
-    // Hash tisztítás CSAK akkor, ha token volt benne (ne töröljük a hibahasht)
-    if (window.location.hash.includes('access_token')) {
-      history.replaceState(null,'', window.location.pathname + window.location.search);
+  if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+    if (session?.user) {
+      currentUser = session.user;
+      if (!currentProfile) await loadProfile();
+      if (document.getElementById('app').classList.contains('hidden')) showApp();
+      if (window.location.hash.includes('access_token')) {
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
     }
-  } else {
+    return;
+  }
+
+  if (event === 'SIGNED_OUT') {
     currentUser = null; currentProfile = null; currentGroup = null;
     if (realtimeSub) { sb.removeChannel(realtimeSub); realtimeSub = null; }
-    document.getElementById('auth-screen').classList.remove('hidden');
-    document.getElementById('app').classList.add('hidden');
+    showAuth();
   }
 });
 
@@ -441,12 +461,20 @@ async function deleteGroup(id) {
 }
 
 async function selectGroup(id) {
-  currentGroup=groups.find(g=>g.id===id); if(!currentGroup) return;
-  document.getElementById('no-group-view').style.display='none';
-  document.getElementById('group-view').style.display='flex';
-  document.getElementById('chat-title').textContent=currentGroup.name;
-  document.getElementById('chat-header-icon').textContent=currentGroup.emoji||'💬';
-  renderGroups(); await loadMessages(); subscribeMessages();
+  // Ha ugyanazt kattintják újra is, újratöltjük az üzeneteket
+  currentGroup = groups.find(g => g.id === id);
+  if (!currentGroup) return;
+
+  document.getElementById('no-group-view').style.display = 'none';
+  document.getElementById('group-view').style.display   = 'flex';
+  document.getElementById('chat-title').textContent     = currentGroup.name;
+  document.getElementById('chat-header-icon').textContent = currentGroup.emoji || '💬';
+
+  renderGroups();
+
+  // Mindig frissen töltjük az üzeneteket (visszakattintáskor is)
+  await loadMessages();
+  subscribeMessages();
 }
 
 async function loadMessages() {
@@ -483,13 +511,15 @@ function subscribeMessages() {
   const gid=currentGroup.id;
   realtimeSub=sb.channel('room-'+gid)
     .on('postgres_changes',{event:'INSERT',schema:'public',table:'messages',filter:`group_id=eq.${gid}`}, async payload => {
-      if(currentGroup?.id!==gid) return;
-      const {data:profile}=await sb.from('profiles').select('username').eq('id',payload.new.user_id).maybeSingle();
-      const msg={...payload.new,profiles:profile};
-      const area=document.getElementById('messages-area');
-      const empty=area.querySelector('.empty-state'); if(empty) empty.remove();
-      area.insertAdjacentHTML('beforeend',buildMessageHtml(msg));
-      area.scrollTop=area.scrollHeight;
+      if (currentGroup?.id !== gid) return;
+      // Deduplikáció: ha már van ilyen ID a DOM-ban (saját küldés), nem adjuk hozzá
+      if (document.querySelector(`[data-msg-id="${payload.new.id}"]`)) return;
+      const {data:profile} = await sb.from('profiles').select('username').eq('id',payload.new.user_id).maybeSingle();
+      const msg = {...payload.new, profiles: profile};
+      const area = document.getElementById('messages-area');
+      const empty = area.querySelector('.empty-state'); if (empty) empty.remove();
+      area.insertAdjacentHTML('beforeend', buildMessageHtml(msg));
+      area.scrollTop = area.scrollHeight;
     })
     .on('postgres_changes',{event:'DELETE',schema:'public',table:'messages',filter:`group_id=eq.${gid}`}, payload => {
       const el=document.querySelector(`[data-msg-id="${payload.old.id}"]`); if(el) el.remove();
