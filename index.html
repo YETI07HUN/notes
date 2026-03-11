@@ -400,6 +400,17 @@ async function loadProfile() {
   }
 }
 
+function showAuth() {
+  document.getElementById('auth-screen').classList.remove('hidden');
+  document.getElementById('app').classList.add('hidden');
+  switchTab('login');
+  clearAlert();
+  // Mezők törlése
+  ['login-email','login-password'].forEach(id => {
+    const el = document.getElementById(id); if(el) el.value = '';
+  });
+}
+
 function showApp() {
   document.getElementById('auth-screen').classList.add('hidden');
   document.getElementById('app').classList.remove('hidden');
